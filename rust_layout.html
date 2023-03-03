@@ -21,7 +21,7 @@
 
     window.onload = onWindowLoad();
     function onWindowLoad() {
-        var divs = document.getElementsByTagName("div");
+        var divs = document.getElementsByTagName("*");
         for (i = 0; i < divs.length; i++) {
             if (divs[i].style.backgroundColor != null && divs[i].style.backgroundColor != "") {
                 divs[i].style.backgroundColor = "Blue";
