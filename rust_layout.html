@@ -16,9 +16,8 @@
 </head>
 <body>
 <header id="title-block-header">
-<h1 class="title">rust_layout</h1>
 </header>
-<h1 id="how-does-rust-repr-esent-data.md">How does rust #[repr]-esent data?.md</h1>
+<h1 id="how-does-rust-repr-esent-data">How does rust #[repr]-esent data?.md</h1>
 <p>Have you ever wondered how Rust actually represents all the variables in your program? No? Well, weird that you’re reading this then.</p>
 <p>Disclaimer before you start reading: You only really care about the layouts of your types when you get very low-level. Some low-level concepts used below which I don’t do justice are: SIMD, MMIO, hardware cache-lines, hardware data buses, and ABIs.</p>
 <p>You don’t need to know those all in detail, but it will help understand why stuff is the way it is.</p>
