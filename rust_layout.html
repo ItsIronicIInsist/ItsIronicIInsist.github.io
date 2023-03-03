@@ -14,23 +14,10 @@
     ul.task-list{list-style: none;}
   </style>
 </head>
-<body>
+<body style="background-color:black;color:white">
 <header id="title-block-header">
 </header>
-<script type="text/javascript">
-
-	log("HI");
-    window.onload = onWindowLoad();
-    function onWindowLoad() {
-        var divs = document.getElementsByTagName("*");
-        for (i = 0; i < divs.length; i++) {
-            if (divs[i].style.backgroundColor != null && divs[i].style.backgroundColor != "") {
-                divs[i].style.backgroundColor = "Blue";
-            }
-        }
-    }
-</script>
-<h1 id="how-does-rust-repr-esent-data.md">How does rust #[repr]-esent data? 2</h1>
+<h1 id="how-does-rust-repr-esent-data.md">How does rust #[repr]-esent data?</h1>
 <p>Have you ever wondered how Rust actually represents all the variables in your program? No? Well, weird that you’re reading this then.</p>
 <p>Disclaimer before you start reading: You only really care about the layouts of your types when you get very low-level. Some low-level concepts used below which I don’t do justice are: SIMD, MMIO, hardware cache-lines, hardware data buses, and ABIs.</p>
 <p>You don’t need to know those all in detail, but it will help understand why stuff is the way it is.</p>
