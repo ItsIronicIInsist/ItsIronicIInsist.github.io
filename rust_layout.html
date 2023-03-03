@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>rust_layout</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">rust_layout</h1>
+</header>
+<h1 id="how-does-rust-repr-esent-data.md">How does rust #[repr]-esent data?.md</h1>
+<p>Have you ever wondered how Rust actually represents all the variables in your program? No? Well, weird that you’re reading this then.</p>
+<p>Disclaimer before you start reading: You only really care about the layouts of your types when you get very low-level. Some low-level concepts used below which I don’t do justice are: SIMD, MMIO, hardware cache-lines, hardware data buses, and ABIs.</p>
+<p>You don’t need to know those all in detail, but it will help understand why stuff is the way it is.</p>
+<h2 id="properties-of-types">Properties of types</h2>
+<p>First - rather than talking about specific variables, it’s better to talk about the types of variables. Each instantiation of a type will have the same representation, so let’s just focus on them. Each type has several properties that affect how the compiler decides to handle how that type is laid out in memory, and furthermore how it’s accessed.</p>
+<p>They are:</p>
+<p><strong>Size</strong> - How many bytes this type actually takes up in memory. A u8 is one byte, a u16 is two bytes, etc. The compiler needs to know, how much memory is each instance of this type expected to take up?</p>
+<p>Note that its not always completely straight forward. Zero-sized types exist, which have NO data associated with them, as well as dynamically-sized types, whose size is not known at compile time (think slices!). You can, in a struct, have a DST as the last field, but not any other field, as that then affects the offsets of the type. Enum fields cant be DSTs at all!</p>
+<pre><code>struct Evil_Struct {
+    DST: [u8],
+    random_var: u64,
+}</code></pre>
+<pre><code>error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+ --&gt; src/main.rs:3:7
+  |
+3 |     DST: [u8],
+  |          ^^^^ doesn&#39;t have a size known at compile-time
+  |
+  = help: the trait `Sized` is not implemented for `[u8]`
+  = note: only the last field of a struct may have a dynamically sized type
+  = help: change the field&#39;s type to have a statically known size
+help: borrowed types always have a statically known size
+  |
+3 |     DST: &amp;[u8],
+  |          +
+help: the `Box` type always has a statically known size and allocates its contents in the heap
+  |
+3 |     DST: Box&lt;[u8]&gt;,
+  |          ++++    +
+
+For more information about this error, try `rustc --explain E0277`.
+warning: `ex` (bin &quot;ex&quot;) generated 1 warning
+error: could not compile `ex` due to previous error; 1 warning emitted
+</code></pre>
+<p><strong>Alignment</strong> - Each variable is stored at an address, in memory, somewhere. But its a naive idea to think at a variable can be placed anywhere in memory. Types have an ‘alignment’ associated with them, which means they can only be stored at addresses that are a multiple of that alignment. A given alignment must be at least 1, and a power of 2.</p>
+<p>A u64 has an 8-byte alignment. That means it can be stored at 0x0 (as an example, don’t go grabbing your pitchforks) , but not 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, or 0x7 (as these addresses are clearly not multiples of 8).</p>
+<p>If you run the below program several times, the address printed should always be a multiple of 8. (The bottom 3 nibbles don’t change for me - which is expected due to out-of-scope stuff. But just in general - trust me that all u64’s will be located at addresses aligned to 8-bytes)</p>
+<pre><code>fn main() {
+    println!(&quot;Addr of a u64 is {:p}&quot;, &amp;0u64);
+}</code></pre>
+<p>You might be wondering - what the fuck? Surely it’s more efficient for your memory footprint to just stores all types wherever they can fit, and ignore alignment. That’s a fair assumption, but unfortunately hardware gets in the way. Because of how accessing memory works on a hardware level, with your cpu/cache/data bus and so on, it’s faster to access data in an aligned manner.</p>
+<p>Think of it like if you can only read memory in 8-byte blocks (0-7, 8-15, 16-23, …). If you reading a u64 and aligned to a block you’re done in one read. If not - you need to read two adjacent blocks. The reality, of course, is even messier, and varies between architectures. But hopefully this illuminated why alignment exists.</p>
+<p><strong>Offsets</strong> - This property is important mainly for structs/enums. With a primitive type like a u8, you’re just accessing the variable directly. But if you have a struct, and you want to access an internal field, the compiler must know the offset of that field from the start of the struct</p>
+<p>If you have:</p>
+<pre><code>struct Ex {
+    A: u64,
+    B: u8
+}</code></pre>
+<p>The compiler will decide upon offsets for both fields, such that it later knows how to access each field when a variable of struct Ex is used.</p>
+<p>One thing to be said is that rust makes no guarantee about the layout of the struct, which mainly relates to it’s offsets. Whilst it’s reasonable to assume field A has an offset of 0, and field B and offset of 8, there is no guarantee to this, and it can change between versions of the rust compiler.</p>
+<p>This is because it’s a very strong stance to take to say that you will always layout a struct in a particular manner - if future optimizations come up, you won’t be able to support those without breaking backwards compatibility, or creating a messy alternative. Most programs don’t care about the stability of their structs layout, as the compiler will always correctly generate offsets if you’re not accessing fields directly via offsets with unsafe code.</p>
+<p>Now, for some examples for these properties:</p>
+<p>u8 - one byte size, one byte alignment. Only one field so offsets don’t really matter. i32 - four byte size, four byte alignment. Also one field. Vec<T> - 24 byte size. 8 Bytes alignment. 3 fields - pointer to the data, the length of the vec, and the capacity of the vec. As a struct Vec<T>’s size is the sum of all it’s field’s sizes. It’s alignment is the max of all it’s fields alignments. We don’t know for certain the offsets to it’s fields, but the compiler will always stick to the offsets it generates.</p>
+<p>Lets quickly return to our example struct, to demonstrate alignment:</p>
+<pre><code>struct Ex {
+    A: u64,
+    B: u8
+}</code></pre>
+<p>Ex has a size of 16. This is because it has an alignment of 8, (as the two fields have an alignment of 8 and 1 respectively, of which 8 is the max). It would be 9 bytes, but the alignment of 8 has it pad 7 bytes at the end so it’s size is aligned to 8 bytes.</p>
+<p>Feel free to run the below program and see for yourself.</p>
+<pre><code>struct Ex {
+    big_align: u64,
+    small_byte: u8
+}
+
+
+fn main() {
+    println!(&quot;The size of Ex is {}&quot;, std::mem::size_of::&lt;Ex&gt;());
+}
+</code></pre>
+<h2 id="field-reordering">Field reordering</h2>
+<p>Now, we’re done with the general properties of a type that affects its layout. Let’s move further into the internals, and see some reasons why rust doesn’t guarantee a defined layout for each struct. The clearest example is field re-ordering.</p>
+<p>If you have a struct</p>
+<pre><code>struct Unpacked {
+    A: u16,
+    B: u32,
+    C: u16
+}</code></pre>
+<p>And rust compiled it as is, without re-ordering fields, it would take up 12 bytes. That would look like</p>
+<pre><code>struct Unpacked {
+    A:    u16,
+    pad1: u16, // b must be 4-byte aligned, so insert an extra u16 here
+    B:    u32,
+    C:    u16,
+    pad2: u16, //the struct itself has 4 byte alignment, so add padding here too
+}</code></pre>
+<p>However, the rust compiler is smart enough to re-order your fields. Your struct definition wont need to change, and all field accesses will be adjusted (at compile time), but it’d realistically look something closer to:</p>
+<pre><code>struct Packed {
+    B: u32,
+    A: u16,
+    C: u16
+}</code></pre>
+<p>Packed will only take up 8-bytes of space. There’s no need for padding, because the u32 goes first, and the two u16’s at the end add up to the 4-byte alignment. Thus, this instantiation only takes up 8 bytes!</p>
+<p>Of course - this example is a very clear-cut one. There’s lot of other aspects that can influence the ‘ideal’ struct layout, which may prefer to have added padding - the easiest example being if you want a specific field to be cache-aligned, adding padding to do so.</p>
+<p>Short note: Why then, can’t rust re-order a struct with a single DST field (and other, non-DST fields), such that the DST field is always placed last? My bet is that it could, and it’s being overly strict so you have to acknowledge how the DST field affects the layout. But that’s just my theory.</p>
+<h2 id="alternative-representations">Alternative representations</h2>
+<p>You can specify different representations of structs/enums, for various different purposes.</p>
+<h2 id="reprc"><code>#[repr(C)]</code></h2>
+<p>This lays a struct out like C would. Essentially, no field re-ordering, it just leaves them as is and adds padding as necessary. This means you know for sure the layout of your struct, and can directly access the fields with unsafe-memory operations if you feel the need.</p>
+<p>Run the below code - it should return that the size is 12 bytes - like the unpacked example above.</p>
+<pre><code>#[repr(C)]
+struct Unpacked {
+    A: u16,
+    B: u32,
+    C: u16,
+}
+
+
+fn main() {
+    println!(&quot;The size of unpacked is {}&quot;, std::mem::size_of::&lt;Unpacked&gt;());
+}</code></pre>
+<p>This repr is mainly used for FFI - foreign function interfacing, where you want to pass data to a program written in another language. C struct layout is generally the expected layout for data when doing so. Do note, however, that adding repr-C to a struct doesn’t actually guarantee it to be FFI-safe.</p>
+<p>Consider the unfortunate example:</p>
+<pre><code>#[repr(C)]
+struct i128_wrapper(i128);</code></pre>
+<p>Where rust’s u128/i128 types don’t match the __int128 C type, and thus aren’t FFI safe.</p>
+<p>Other uses exist - particular low-level uses like interacting with MMIO, in which a struct’s fields NEED to be at set offsets. (MMIO is a low-level concept, where reading/writing memory can have different effects depending on what address you’re using).</p>
+<p>Repr-C also has a unique effect on enums. For enums where the fields have no associated data, it just ensures the layout will match a C enum - which is most of the time an i32. The target architecture decides this, but essentially just an integer of some sort.</p>
+<p>However, for enums where at least one field has associated data, a representation is defined such that the enum becomes safe for FFI with C(++). This is needed as C(++) enums don’t allow associating data with an enum field.</p>
+<h2 id="repralignx"><code>#[repr(align(X))]</code></h2>
+<p>This forces the minimum alignment of a type to be X. Once again, X must be a multiple of 2, and at least 1. This relates back to how alignment can lead to hardware improvements. Normal assembly instructions have loads/stores of up to 8 bytes, but most architectures have special registers to allow larger loads. These loads still have to be aligned to be fast though.</p>
+<p>An example:</p>
+<pre><code>#[derive(Clone, Copy)]
+pub struct SomeU32s([u32; 4]);
+
+#[derive(Clone, Copy)]
+#[repr(align(16))]
+pub struct SomeAlignedU32s([u32; 4]);
+
+pub fn readu(x: &amp;SomeU32s) -&gt; SomeU32s {
+  *x
+}
+pub fn reada(x: &amp;SomeAlignedU32s) -&gt; SomeAlignedU32s {
+  *x
+}</code></pre>
+<p>Generates the asm:</p>
+<pre><code>example::readu:
+        mov     rax, rdi
+        movups  xmm0, xmmword ptr [rsi]
+        movups  xmmword ptr [rdi], xmm0
+        ret
+
+example::reada:
+        mov     rax, rdi
+        movaps  xmm0, xmmword ptr [rsi]
+        movaps  xmmword ptr [rdi], xmm0
+        ret</code></pre>
+<p>You don’t need to understand the actual assembly - just notice how <code>example::readu</code> uses movups, but <code>example::reada</code> uses movaps. These instructions are near equivalent, excepts movaps is the aligned variant of movups. This means, hardware-wise, the second function would be faster.</p>
+<p>Another example might be an array of structs - where you add an repr-align such that each member is cacheline-aligned.</p>
+<h2 id="reprpacked"><code>#[repr(packed)]</code></h2>
+<p>This is the repr to essentially ignore alignment. It sets the max alignment of the type to 1, effectively ignoring alignment entirely. It should be packed tightly, with no padding bytes, especially no trailing ones.</p>
+<pre><code>#[repr(packed)]
+struct Ex {
+    big_align_except_no: u64,
+    small_byte: u8
+}
+
+
+fn main() {
+    println!(&quot;The size of Ex is {}&quot;, std::mem::size_of::&lt;Ex&gt;());
+}</code></pre>
+<p>This program should spit out that Ex is 9 bytes - the 7 bytes that used to be trailing are gone!</p>
+<p>Repr-packed minimises your memory footprint - however it’s highly inadvisable. In general, performance trumps memory footprint for most modern environments.</p>
+<p>Also, depending on the architecture, unaligned memory accesses aren’t performance drops - they’re exceptions. This means that for rust to actually use a packed struct, it has to do a lot of internal work, with bit shifts and masks, to essentially emulate aligned loads. Nasty.</p>
+<p>And for a similar reason, you can’t take references to a packed struct’s fields. The rust compiler is unfortunately not smart enough, and loses information - thus it would see a reference to an ‘aligned’ type, try to generate aligned accesses, and potentially cause an exception. Thus the compiler disallows it (except if the field’s type also has an alignment of 1, like a byte)</p>
+<pre><code>#[repr(packed)]
+struct Ex {
+    big_align_except_no: u64,
+    small_byte: u8
+}
+
+
+fn main() {
+    let a = Ex { big_align_except_no: 0, small_byte: 12 };
+
+    println!(&quot;The address of a.big_align_except_no is {:x}&quot;, &amp;a.big_align_except_no);
+   
+    //Legal
+    //println!(&quot;The address of a.small_byte is {:p}&quot;, &amp;a.small_byte);
+
+}</code></pre>
+<pre><code>error: reference to packed field is unaligned
+  --&gt; src/main.rs:35:59
+   |
+35 |     println!(&quot;The address of a.big_align_except_no is {:x}&quot;, &amp;a.big_align_except_no);
+   |                                                              ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(unaligned_references)]` on by default
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #82523 &lt;https://github.com/rust-lang/rust/issues/82523&gt;
+   = note: fields of packed structs are not properly aligned, and creating a misaligned reference is undefined behavior (even if that reference is never dereferenced)
+   = help: copy the field contents to a local variable, or replace the reference with a raw pointer and use `read_unaligned`/`write_unaligned` (loads and stores via `*p` must be properly aligned even when using raw pointers)
+</code></pre>
+<h2 id="reprtransparent"><code>#[repr(transparent)]</code></h2>
+<p>Repr-transparent only works on a struct/enum with a single-non ZST field (ZST = zero sized type).</p>
+<p>Imagine:</p>
+<p><code>struct zId(u32);</code></p>
+<p>Here, you define a new type, zId, that’s really just a wrapper for a u32. This can be nice, because it can assure you when operating on such values in your code, that you know you’re working with ‘zIds’, and not u32s in general.</p>
+<p>However, zId is a whole different type from u32, despite the fact that they seem almost functionally identical. Rustc makes no guarantee that zId will have the same layout as u32, despite u32 being it’s only field containing data.</p>
+<p>You can move from zId to u32 by accessing the .0 field, and from u32 to zId by doing zId(u32_val). But often there are other use cases where this difference in types disallows behaviour you’d like to use.</p>
+<p>That’s what #[repr(transparent)] does. It ensure that the layout of the struct/enum matches it’s inner field. This enables transmuting/ptr casting from a transparent struct and its inner type. This also affects the type’s ABI. Certain ABIs treat structs differently from primitives, but transparent ensures the wrapping struct has the same ABI as it’s inner field.</p>
+<p>Note: I tried to find an example of this difference in ABI, but rust seems to treat these single-fielded structs as their inner fields anyways. Rust’s lack of guarantees doesn’t necessarily indicate a difference in layout, it just leaves the possibility of one in case of future optimizations.</p>
+<p>Layout randomization is another example of the use for #[repr(transparent)] Layout randomization is, as the name suggests, randomizing the layout, usually via the order of the fields. This would be used to detect bugs in code that make unbased assumptions about struct layouts - because without an explicit repr, rust makes no guarantees.</p>
+<p>Thus, another reason for #[repr(transparent)] is the situation</p>
+<pre><code>struct S1 {
+    A: u64,
+    B: u8,
+    C: String,
+}
+#[repr(transparent)]
+struct S2(S1);</code></pre>
+<p>With layout randomization, if S2 didnt have a transparent layout, it’s own, internal layout of the fields of S1 could be entirely different than S1 itself.</p>
+<h2 id="reprui"><code>#[repr(u*/i*)]</code></h2>
+<p>For explicitly defining the size amongst fieldless enums, as once again rust doesn’t define a layout for them, as that’s a strong commitment. Rust usually chooses the smallest that works, but it’s not a guarantee.</p>
+<p>If you do #[repr(C)] it’ll default to an i32 (most likely, depending on ABI). But, for example, you may want to explicitly specify an i8 for example, if your enum doesnt have many options, whilst still ‘stabilising’ it’s layout.</p>
+<p>This can also be nice for C++ FFI, if the equivalent type on the C++ side is an enum that explicitly sets it’s underlying type.</p>
+<p>This also does the same as repr-C in setting the layout of enums with data to ensure safety for C(++) FFI.</p>
+<p>One interesting tidbit, or why the repr-C FFI safe layout is not standard is the null pointer optimization.</p>
+<p>Imagine an enum:</p>
+<pre><code>enum Optimised {
+    A,
+    B(&amp;u64),
+}</code></pre>
+<p>B holds data - a reference to a u64. Now, you might imagine that the easiest way to represent the enum is something like:</p>
+<pre><code>struct UnOptimised {
+    tag: i8,
+    data: &amp;u64
+}</code></pre>
+<p>However, references cannot be null (e.g equal to 0). So, the rust compiler knows that it can instead represent this enum with one field - something loosely like:</p>
+<pre><code>struct Optimised {
+    compressed: u64
+}</code></pre>
+<p>Now - how does this work? Don’t we need at least 1 bit for the tag? But since a reference is non-nullable, if the enum is equal to 0, we know its Optimised::A, and if it’s any other value, we know its Optimised::B, and the value is the actual reference.</p>
+<p>Note that the above struct, ‘compressed’ isn’t actually a u64 - it was just an example to show how the enum could be represented in a more compressed manner.</p>
+<p>And, getting back on track - repr(i<em>/u</em>) and repr( C ) disallow this. :(</p>
+<h2 id="reprsimd"><code>#[repr(simd)]</code></h2>
+<p>SIMD stands for Same Instruction Multiple Data, and this repr once again digs into hardware internals.</p>
+<p>To illustrate the need for SIMD instructions, a short code example will hopefully be helpful:</p>
+<pre><code>fn double_slice(slice: &amp;mut [u8]) {
+
+    for element in slice.iter_mut() {
+        element *= 2
+    }
+}</code></pre>
+<p>You can imagine this function - double a slice of u8s. Traditionally, the assembly would: - Get the index - Load the byte from the slice, using the given index - Double it - Restore the index</p>
+<p>That’s a slow approach. Registers are usually at least 8-bytes on x86-64 bit systems. It would be much nicer if we could (assuming the slice was long enough), load in bytes in 8-byte chunks, and perform the multiply on them chunk-by-chunk?</p>
+<p>This motivates what is called Same-Instruction, Multiple-Data. The same instruction here is the multiply, the multiple data is the elements of the array - we want to perform the same operation repeatedly, in a fast manner.</p>
+<p>#[repr(simd)] can be used for a struct that’s essentially a group of a repeated primitive. Here, the generic simd would need the generic to be a primitive.</p>
+<pre><code>#[repr(simd)]
+struct f32x4(f32, f32, f32, f32);
+
+#[repr(simd)]
+struct Simd2&lt;T&gt;(T, T);
+
+// ILLEGAL !! If T and V vary, that&#39;d be invalid
+#[repr(simd)]
+struct Simd2&lt;T, V&gt;(T, V);</code></pre>
+<p>For types with repr-simd, SIMD operations become available to operate on them, which can greatly speed up certain tasks.</p>
+<p>If you want to see for yourself, try running both programs below (I ran them as: cargo run –release)</p>
+<pre><code>fn main() {
+
+    let mut arr = [0u8 ; 16 * 512];
+    for i in 0..100_000_000 {
+        square_slice(&amp;mut arr);
+    }
+
+}
+
+
+#[inline(never)]
+fn square_slice(slice: &amp;mut [u8]) {
+
+    for element in slice.iter_mut() {
+        *element *= *element;
+    }
+}
+</code></pre>
+<pre><code>#![feature(repr_simd)]
+#![feature(platform_intrinsics)]
+
+fn main() {
+
+    let mut simds = [u8x16(0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8 ) ; 512];
+    for i in 0..100_000_000 {
+        square_simd(&amp;mut simds);
+    }
+
+}
+
+
+#[repr(simd)]
+#[derive(Clone, Copy)]
+struct u8x16(u8, u8, u8, u8,        u8, u8, u8, u8,         u8, u8, u8, u8,         u8, u8, u8, u8);
+
+#[inline(never)]
+fn square_simd(simd_slice: &amp;mut [u8x16]) {
+    
+    for element in simd_slice.iter_mut() {
+        unsafe {
+            simd_mul::&lt;u8x16&gt;(*element, *element);
+        }
+    }
+}
+
+extern &quot;platform-intrinsic&quot; {
+    fn simd_mul&lt;T&gt;(x: T, y: T) -&gt; T;
+}
+</code></pre>
+<p>One thing - I initialise the arrays here all to 0 - this is because I am lazy and don’t want to reset them every few loops to avoid overflows. There is the potential that in the actual hardware instructions, there’s a fastpath for multiplying by 0 - but I’m going to assume if its present for either the basic mul or the SIMD mul, it’s available for the other. In that case, the non-vectorized code being slower still shows how much time is wasted on memory loading/storing.</p>
+<p>Do note that repr-simd is currently a nightly feature, and thus not available to ‘normal’ rust.</p>
+<h2 id="conclusions">Conclusions</h2>
+<p>This was my overview of how rust lays out types in memory. I hope you enjoyed, and learned something new.</p>
+<p>Thanks to Gankra (the faultlore author), Josh (for finding the amazing SIMD rfc), and all the people on the Rust discord for answering all my questions!</p>
+<h2 id="useful-links">Useful links</h2>
+<p>https://faultlore.com/blah/rust-layouts-and-abis/ https://doc.rust-lang.org/nomicon/data.html https://rust-lang.github.io/rfcs/1199-simd-infrastructure.html https://github.com/rust-lang/rfcs/blob/master/text/2195-really-tagged-unions.md https://github.com/rust-lang/rust/issues/54341</p>
+</body>
+</html>
