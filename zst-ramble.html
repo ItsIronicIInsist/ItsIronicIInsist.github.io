@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>zst-ramble</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+  </style>
+</head>
+<body style="background-color:black;color:white">
+<h1 id="zsts-in-rust">ZSTs in Rust</h1>
+<p>Back when I was learning Rust, I found the notion of ZSTs - that is, zero-sized types with no data associated with them, to be interesting. I made a start on this blogpost, but never finished it. Finally, here it is.</p>
+<p>To note, none of this is revolutionary or new - I wrote this to better learn the topic myself, all of this is borrowed from other sources (all found below!). Still, hopefully this acts to collate most of the interesting things you can do with ZSTs, and just maybe my wording can give a new perspective.</p>
+<h2 id="the-zst-youve-seen-before--">The ZST you’ve seen before - ()</h2>
+<p>The empty tuple - the biggest use case (to me, at least) where it’s explicit is if you want a function that can return an error, but doesnt need to return any data on success, which’d look like: <code>Result&lt;(), Err&gt;</code></p>
+<p><code>()</code> is of course actually much more frequent, because any functions that dont return anything actually return <code>()</code> implicitly.</p>
+<p>There’s not too much to talk about for <code>()</code>. But there are several more ZSTs. How can they offer something new without data to differentiate them?</p>
+<h2 id="never---to-indicate-no-return">!: Never - To indicate no return</h2>
+<p>The <code>!</code> type is used for functions which will never return.</p>
+<h3 id="bailing-out-of-branches">Bailing out of branches</h3>
+<p>This allows you to do:</p>
+<pre><code>fn random_function(v: Result&lt;i32, String&gt;) -&gt; i32 {
+    match v {
+        Ok(_) =&gt; { 10 },
+        Err(s) =&gt; {
+            panic!(&quot;{s}&quot;);
+        },
+    }
+}</code></pre>
+<p>The <code>Err</code> branch of the match statement here obviously doesn’t return an <code>i32</code> - yet this is valid code. This is because the compiler knows that once it panics, its never returning to this function, thus can ignore this arm not returning an <code>i32</code>.</p>
+<p>I will say that <code>panic!</code> is a macro, and we don’t actually know what it’s return type is, so I used <code>cargo expand</code>, and it turned into:</p>
+<pre><code>::core::panicking::panic_fmt(format_args!(&quot;{0}&quot;, s));</code></pre>
+<p>For which, the documentation is <a href="https://doc.rust-lang.org/core/panicking/fn.panic_fmt.html">here</a>. (Of course we can reason that we know it’d expand into a function that doesn’t return, but just to show explicitly).</p>
+<p>There’s nothing special about <code>panic!</code> either. Any function that doesn’t return works, such as the basic:</p>
+<pre><code>fn never_ending() -&gt; ! {
+    loop {}
+}
+
+fn random_function(v: Result&lt;i32, String&gt;) -&gt; i32 {
+    match v {
+        Ok(_) =&gt; { 10 },
+        Err(_) =&gt; {
+            NeverEnding();
+        },
+    }
+}</code></pre>
+<p>Just to clearly make the difference between <code>!</code> and <code>()</code> clear, if <code>panic!</code> or <code>NeverEnding</code> returned <code>()</code>, that would imply they do return, just with no data to return - the compiler would see that and then complain that the <code>Err</code> arm doesn’t return the <code>i32</code> it needs to.</p>
+<p>Related to this is a key difference between <code>()</code> and <code>!</code> - <code>()</code> is always constructible, yet <code>!</code> is never constructible - that is, it’s an empty type.</p>
+<p>This makes sense - if your function returns <code>!</code>, and <code>!</code> is literally impossible to construct, then of course such a function cannot return.</p>
+<p>There does seem to be a bit of compiler magic surrounding <code>!</code> - it’s possible to define empty types easily, like <code>enum Void {}</code>, but if I do</p>
+<pre><code>enum Void {}
+fn never_ending() -&gt; Void {
+    loop {}
+}
+
+fn random_function(v: Result&lt;i32, String&gt;) -&gt; i32 {
+    match v {
+        Ok(_) =&gt; { 10 },
+        Err(_) =&gt; {
+            NeverEnding();
+        },
+    }
+}</code></pre>
+<p>The compiler is no longer happy with this code. Though, this isn’t a big deal - there’s little point to do this when <code>!</code> is much clearer code and works properly.</p>
+<h3 id="deleting-enum-variants">Deleting enum variants</h3>
+<p>The inability to construct <code>!</code> can also be used to delete variants from certain enums.</p>
+<p>If a function returns <code>Result&lt;T, !&gt;</code>, that means that it will only return upon succeeding. This particular example doesn’t make much sense - why not just return <code>T</code>? But when handling generics, such as with trait-impls, it can make sense. For example, implementing <code>FromStr</code> for <code>String</code> would logically never fail. <code>FromStr</code> looks like:</p>
+<pre><code>trait FromStr: Sized {
+    type Err;
+    fn from_str(s: &amp;str) -&gt; Result&lt;Self, Self::Err&gt;;
+}</code></pre>
+<p>You could define a new trait like <code>FromStrInfallible</code>, but anything that works on the <code>FromStr</code> trait (like using it as a trait-bound) wouldn’t work. So instead, when implementing <code>FromStr</code> for <code>String</code>, you can set <code>type Err = !</code>;</p>
+<p>Then, whenever you call <code>String::from_str</code>, you can destructure it with just the <code>Ok</code> field, as the <code>Err</code> field can never be constructed. See:</p>
+<pre><code>let Ok(s) = String::from_str(&quot;hi&quot;);</code></pre>
+<p>The converse notion, of a function that only returns if it errors, can be represented as <code>Result&lt;!, E&gt;</code>. If you have a web server thats meant to always be running and taking requests, returning if an error occurs.</p>
+<pre><code>fn server_loop() -&gt; Result&lt;!, ConnectionError&gt; {
+    loop {
+        let (client, request) = get_request()?;
+        let response = request.process();
+        response.send(client);
+    }
+}</code></pre>
+<p>Which we could then destructure as:</p>
+<pre><code>let Err(e) = server_loop();</code></pre>
+<p>Two more things to say on this:<br> First - the <code>!</code> is still experimental, and must be opted into with <code>#![feature(never_type)]</code>.<br> Secondly - we must also enable <code>#![feature(exhaustive_patterns)]</code> to let us destructure stuff like this. An article which seemed to explain a bit about why this isn’t easy to just implement in was <a href="https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/">this</a>, though I can’t speak for their suggestions as to the solution.</p>
+<p>Please note that just because both of these use <code>Result</code> as the example enum to ‘delete options from’, doesn’t imply this doesn’t extend to other enums. If you can specify the type of a generic that a variant takes, it can be deleted by giving it <code>!</code> or any empty type.</p>
+<pre><code>// No generics we can turn into &#39;!&#39;
+enum CantDelete {
+    Option1,
+    Option2,
+}
+
+// When constructing can give &#39;!&#39; as &#39;T&#39; so we can exhaustively match just the first option
+enum CanDelete&lt;T&gt; {
+    Option1(u32),
+    DeletableOption2(T),
+}
+
+
+fn main() {
+    let exhaustable : CanDelete&lt;!&gt; = CanDelete::Option1(10);
+    let CanDelete::Option1(num) = exhaustable;
+}</code></pre>
+<h2 id="phantomdata">PhantomData</h2>
+<p><code>PhantomData</code> is a ZST associated with a generic T. Sometimes, we have structs which are associated with certain types, but don’t actuall have them as fields. Rust disallows unused parameters for types, so instead we insert a ‘PhantomData’ of that type.</p>
+<p>A simple way of thinking about it is that at compile time, it looks like that struct has a member of type T, whereas at run time, its actually a ZST.</p>
+<h3 id="associating-lifetimes">Associating lifetimes</h3>
+<p>For an iterator defined for &amp;‘a [T]’, the layout would look something like:</p>
+<pre><code>struct Iter&lt;&#39;a, T: &#39;a&gt; {
+    ptr: *const T,
+    end: *const T,
+}</code></pre>
+<p>However as mentioned we can’t have unused parameters - so instead we associate the lifetime using PhantomData.</p>
+<pre><code>struct Iter&lt;&#39;a, T: &#39;a&gt; {
+    ptr: *const T,
+    end: *const T,
+    _marker: marker::PhantomData&lt;&amp;&#39;a T&gt;,
+}</code></pre>
+<p>Now, the iterator is properly bounded by the lifetime ’a (and is actually covariant over it).</p>
+<p>Given that we don’t actually ever make use of the marker, <code>PhantomData</code> is a very nice choice. We could potentially just associate a real <code>&amp;'a T</code> with the struct, but then we’re bloating the size of the struct with fields we won’t actually use - <code>PhantomData</code> doesn’t do this given it compiles down to a ZST.</p>
+<p>One thing to note is that you should know the variance you want to associate with the struct in relation to <code>'a</code> and <code>T</code>. A good read for that is <a href="https://doc.rust-lang.org/nomicon/subtyping.html">here</a></p>
+<h3 id="edge-cases-with-destructors">Edge cases with destructors</h3>
+<p>It used to be also necessary to introduce <code>PhantomData</code> to guarantee the correctness of some destructors. For <code>Vec&lt;T&gt;</code>, which may look like:</p>
+<pre><code>struct Vec&lt;T&gt; {
+    data: *const T, // *const for variance!
+    len: usize,
+    cap: usize,
+}</code></pre>
+<p>The compiler used to say that <code>Vec&lt;T&gt;</code> doesnt own any <code>T</code> and doesn’t need to drop them, - we would then add a <code>PhantomData&lt;T&gt;</code> to it. Now however, as long as <code>Vec&lt;T&gt;</code> implements</p>
+<pre><code>impl&lt;T&gt; Drop for Vec&lt;T&gt;</code></pre>
+<p>The compiler sees that <code>Vec&lt;T&gt;</code> may use values of type <code>T</code> when dropping stuff, and thus does what we want here.</p>
+<p>The edge case is, however, that if struct associated with <code>T</code> (<code>Vec&lt;T&gt;</code> here) doesn’t implement <code>Drop</code>, but does have drop-glue because of one of it’s members having drop-glue, a <code>PhantomData</code> is still required for stuff to get dropped properly.</p>
+<h3 id="removing-auto-traits-oibits">Removing auto-traits (OIBITs)</h3>
+<p>Auto-traits are traits that are automatically derived for a type given they don’t have any fields that don’t derive them, and don’t opt out themselves.</p>
+<p>A common example is <code>Send</code> and <code>Sync</code>. To opt out, in the future you’d do something like:</p>
+<pre><code>struct Mytype {
+    x: i32
+}
+
+impl !Sync for MyType {}</code></pre>
+<p>However this is currently still unstable. The stable alternative is to use PhantomData for a type that doesn’t implement the given auto-trait.</p>
+<pre><code>struct Mytype {
+    x: i32
+    _marker: PhantomData&lt;Cell&lt;u8&gt;&gt; // The type `Cell` wraps isn&#39;t particularly important - maybe not a ZST itself?
+}</code></pre>
+<h2 id="state-machines">State machines</h2>
+<p>An article I read talked about using ZSTs to <a href="https://dev.to/hoonweedev/whats-the-use-of-zero-sized-types-in-rust-4e83">implement a state machine.</a></p>
+<p>I will first say that I don’t have a fully formal understanding what exactly a state-machine is and isn’t, so take my thoughts with a grain of salt.</p>
+<p>The state machine implemented is very simple, and I don’t think you could get very far without variables to hold data you might need. You could have a struct with all the different variables you might need, as well as a ‘State’ struct, but if a given state has data irrelevant to other states, this becomes bloated. Overall, a better design seemed to be <a href="https://hoverbear.org/blog/rust-state-machine-pattern/">something like this</a>.</p>
+<p>I can’t see it being a common need for a ZST-based state-machine unless size truly is critical.</p>
+<h2 id="zst-instantiations-as-proof">ZST instantiations as proof</h2>
+<p>Onto some other uses of ZSTs which I do think are genuinely novel, which all come from <a href="https://www.hardmo.de/article/2021-03-14-zst-proof-types.md">here</a>.</p>
+<p>I recommend reading the full article - though it is a doozy. Centered mostly around the power of rusts type system, where ZST types act as theorums and instantiations of those act as proofs (Where the constructor can have certain invariants needed to construct them). I’ll only be talking about two examples which I like, as I am decently afraid of miswording the article.</p>
+<h3 id="Replace marker traits">Replacing Marker traits</h3>
+<p>Marker traits act to indicate that a given property holds for a type. A function that requires this can have a trait bound, like <code>fn foo(T: Copy)</code></p>
+<p>However, a ZST with a constructor that requires that trait-bound can instead be provided to the function, removing this trait-bound. See:</p>
+<code>
+fn some_op_that_requires_copy<T: Copy>() {
+  // ..
+}
+
+#[derive(Clone, Copy)].
+struct IsCopy<T>(PhantomData<T>);
+
+impl<T: Copy> IsCopy {
+  // The constructor is gated by T: Copy
+  pub fn new() -> Self { IsCopy(PhantomData) }
+}
+
+// But the method itself has _no_ bound.
+fn some_op_that_requires_copy<T>(_: IsCopy<T>) {
+  // ..
+}
+</code>
+<p> Note that for non-marker traits that act to give you actual functions/behaviour to work with, this replacement doesn't really make sense.</p>
+<p> For a given interface with competing marker-traits, choosing a specific implementation will lock you into that choice. Instead, proof ZSTs can help.</p>
+<p> The example given is the Pod (Plain-old data) marker trait, with several different impls. Instead of having functions with trait bounds like <code>fn foo(T: bytemuck::Pod)</code>, we can have a ZST generic over T that has several different constructors depending on your preferred marker trait. Then we define the actual needed behaviour on that ZST, and any functions that need the Pod behaviour for T takes in the ZST.</p>
+<code>
+#[derive(Clone, Copy)]
+pub struct Pod<T>(PhantomData<T>);
+
+impl Pod<T> {
+  pub const unsafe fn new_unchecked() -> Self {
+    Pod(PhantomData)
+  }
+
+  pub fn with_bytemuck() -> Self
+    where Self: bytemuck::Pod,
+  {
+    Pod(PhantomData)
+  }
+
+  pub fn with_zerocopy() -> Self
+    where Self: zerocopy::FromBytes + zerocopy::AsBytes,
+  {
+    Pod(PhantomData)
+  }
+
+  pub fn cast_mut<'t>(self, buf: &'t mut [u8]) -> Option<&'t mut T> {
+    if buf.as_ptr().align_offset(mem::align_of::<T>()) != 0 {
+      None
+    } else if buf.len() < mem::size_of::<T>() {
+      None
+    } else {
+      Some(unsafe { &mut *(buf.as_mut_ptr() as *mut T) })
+    }
+  }
+}
+
+pub fn validate<T>(buf: &mut [u8], proof: Pod<T>)
+  -> Option<&mut T>
+{
+  let t = proof.cast_mut(buf)?;
+  // ...
+  Some(t)
+}
+</code>
+<h3 id="proof-of-work">Proof of work</h3>
+<p>It’s a common scenario to have a struct that’s expensive to initialise, and we may not necessarily need, and thus only want to initalise when necessary.</p>
+<p>Here, we tend to use <code>OnceCell</code> or <code>OnceLock</code>. Because we don’t know if they’re initalised, <code>.get()</code> returns an <code>Option&lt;T&gt;</code>. There is a need to check before each access, which affects performance. We could instead create a ‘tagged’ OnceCell, that when we initialise returns a ZST that implies the initialisation, and have that ZST as an unused argument to <code>.get()</code> to conifently have get return <code>T</code>. See below:</p>
+<pre><code>use core::marker::PhantomData;
+use once_cell::sync::OnceCell;
+
+pub struct TaggedOnceCell&lt;T, Tag&gt; {
+  cell: OnceCell&lt;T&gt;,
+  tag: PhantomData&lt;Tag&gt;,
+}
+
+/// A marker proving that the unique cell with tag `Tag` is initialized.
+#[derive(Clone, Copy)]
+pub struct Init&lt;Tag&gt;(PhantomData&lt;Tag&gt;);
+
+impl&lt;T, Tag&gt; TaggedOnceCell&lt;T, Tag&gt; {
+  /// Make an uninitialized cell.
+  /// This must only be called once for each `Tag` type.
+  pub const unsafe fn new() -&gt; Self {
+    TaggedOnceCell { cell: OnceCell::new(), tag: PhantomData }
+  }
+
+  pub fn get_or_init&lt;F&gt;(&amp;self, f: F) -&gt; Init&lt;Tag&gt;
+  where
+    F: FnOnce() -&gt; T
+  {
+    let _ = self.cell.get_or_init(f);
+    Init(self.tag)
+  }
+
+  pub fn get(&amp;self, _: Init&lt;Tag&gt;) -&gt; &amp;T {
+    // SAFETY: Init proves that `get_or_init` has successfully 
+    // returned before, initializing the cell.
+    unsafe { self.cell.get_unchecked() }
+  }
+}</code></pre>
+<p>The above is taken from the website listed - I think <code>get_or_init</code> probably ought to return a tuple of the ‘proof ZST’ as well as <code>T</code>, but it should be visible why <code>get</code> is safe, despite having unsafe code.</p>
+<p>Unfortunately, having <code>OnceCell</code>/<code>OnceLock</code> ported to the core library, they have removed <code>get_unchecked</code>, so we can’t do this cool trick using the core versions. :(</p>
+<h2 id="conclusion">Conclusion</h2>
+<p>That’s all I’ve managed to dig up about ZSTs - it was a pretty fun deep dive. Kudos to all the authors of the listed articles, please check them out for a more in-depth discussion of each given topic.</p>
+<p>Additionally, thanks to all the people who’ve answered my questions, especially on the rust discord!!!</p>
+<h2 id="resources">Resources</h2>
+<a href="https://doc.rust-lang.org/std/primitive.never.html">https://doc.rust-lang.org/std/primitive.never.html</a><br>
+<a href="https://github.com/rust-lang/rust/issues/35121">https://github.com/rust-lang/rust/issues/35121</a><br>
+<a href="https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/">https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/</a><br>
+<a href="https://doc.rust-lang.org/nomicon/phantom-data.html">https://doc.rust-lang.org/nomicon/phantom-data.html</a><br>
+<a href="https://doc.rust-lang.org/std/marker/struct.PhantomData.html">https://doc.rust-lang.org/std/marker/struct.PhantomData.html</a><br>
+<a href="https://users.rust-lang.org/t/looking-for-a-deeper-understanding-of-phantomdata/32477/4">https://users.rust-lang.org/t/looking-for-a-deeper-understanding-of-phantomdata/32477/4</a><br>
+<a href="https://dev.to/hoonweedev/whats-the-use-of-zero-sized-types-in-rust-4e83">https://dev.to/hoonweedev/whats-the-use-of-zero-sized-types-in-rust-4e83</a><br>
+<a href="https://hoverbear.org/blog/rust-state-machine-pattern/">https://hoverbear.org/blog/rust-state-machine-pattern/</a><br>
+<a href="https://www.hardmo.de/article/2021-03-14-zst-proof-types.md">https://www.hardmo.de/article/2021-03-14-zst-proof-types.md</a><br>
+</body>
+</html>
